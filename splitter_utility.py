@@ -30,41 +30,50 @@ def parse_size(size_str):
 def split_file(file_path, output_dir=None, chunk_size=DEFAULT_CHUNK_SIZE):
     if not os.path.exists(file_path):
         raise FileNotFoundError(file_path)
+    if chunk_size <= 0:
+        raise ValueError(f"chunk_size must be > 0, got {chunk_size}")
 
-    if output_dir is None:
-        output_dir = os.path.dirname(file_path)
-
-    os.makedirs(output_dir, exist_ok=True)
     base_name = os.path.basename(file_path)
     total_size = os.path.getsize(file_path)
-    parts = []
 
+    if output_dir is None or output_dir.strip() == "":
+        parent_dir = os.path.abspath(os.path.dirname(file_path) or ".")
+        output_dir = os.path.join(parent_dir, f"{base_name}_split")
+
+    os.makedirs(output_dir, exist_ok=True)
+    print(f"[info] Writing parts to: {output_dir}")
+
+    parts = []
     print(f"\nSplitting '{base_name}' ({total_size / (1024**3):.2f} GB)...\n")
 
+    WRITE_BLOCK = 8 * 1024 * 1024
     with open(file_path, "rb") as infile, tqdm(
-        total=total_size,
-        unit="B",
-        unit_scale=True,
-        desc="Overall progress",
-        ncols=80,
-        leave=True,
+        total=total_size, unit="B", unit_scale=True, desc="Overall progress", ncols=80, leave=True
     ) as pbar:
         idx = 1
-        while True:
-            chunk = infile.read(chunk_size)
-            if not chunk:
-                break
-
+        bytes_left = total_size
+        while bytes_left > 0:
+            to_write = min(chunk_size, bytes_left)
             part_name = f"{base_name}.part{idx:03d}"
             part_path = os.path.join(output_dir, part_name)
-            with open(part_path, "wb") as outfile:
-                outfile.write(chunk)
 
-            md5 = md5sum(part_path)
-            parts.append({"filename": part_name, "size": len(chunk), "md5": md5})
-            pbar.update(len(chunk))
-            tqdm.write(f"Wrote {part_name} ({len(chunk) / (1024**2):.1f} MB)")
+            md5 = hashlib.md5()
+            written = 0
+            with open(part_path, "wb") as outfile:
+                while written < to_write:
+                    block = min(WRITE_BLOCK, to_write - written)
+                    buf = infile.read(block)
+                    if not buf:
+                        break
+                    outfile.write(buf)
+                    md5.update(buf)
+                    written += len(buf)
+                    pbar.update(len(buf))
+
+            parts.append({"filename": part_name, "size": written, "md5": md5.hexdigest()})
+            tqdm.write(f"Wrote {part_name} ({written / (1024**2):.1f} MB)")
             idx += 1
+            bytes_left -= written
 
     manifest = {
         "original_filename": base_name,
@@ -73,7 +82,6 @@ def split_file(file_path, output_dir=None, chunk_size=DEFAULT_CHUNK_SIZE):
         "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
         "parts": parts,
     }
-
     manifest_path = os.path.join(output_dir, f"{base_name}.manifest.json")
     with open(manifest_path, "w") as f:
         json.dump(manifest, f, indent=2)
@@ -86,8 +94,12 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Split large files into chunks with manifest")
     parser.add_argument("file", help="Path to the file to split")
     parser.add_argument(
-        "-o", "--output", help="Output directory (default: same as file)", default=None
+        "-o", 
+        "--output",
+        help="Output directory (default: {filename}_split next to the file)",
+        default=None
     )
+
     parser.add_argument(
         "-s",
         "--chunk-size",
